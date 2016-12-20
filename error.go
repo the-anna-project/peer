@@ -1,4 +1,4 @@
-package service
+package peer
 
 import (
 	"fmt"
@@ -27,6 +27,20 @@ var alreadyExistsError = errgo.New("already exists")
 // IsAlreadyExists asserts alreadyExistsError.
 func IsAlreadyExists(err error) bool {
 	return errgo.Cause(err) == alreadyExistsError
+}
+
+var invalidConfigError = errgo.New("invalid config")
+
+// IsInvalidConfig asserts invalidConfigError.
+func IsInvalidConfig(err error) bool {
+	return errgo.Cause(err) == invalidConfigError
+}
+
+var invalidPositionError = errgo.New("invalid position")
+
+// IsInvalidPosition asserts invalidPositionError.
+func IsInvalidPosition(err error) bool {
+	return errgo.Cause(err) == invalidPositionError
 }
 
 var notFoundError = errgo.New("not found")
