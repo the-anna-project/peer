@@ -1,3 +1,4 @@
+// Package peer provides peer management primitives for the neural network.
 package peer
 
 import (

@@ -1,4 +1,3 @@
-// Package peer implements Service to manage peers inside the neural network.
 package peer
 
 import (
@@ -236,12 +235,12 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 			peerConfig.ID = peerAID
 			peerConfig.Kind = s.Kind()
 			peerConfig.Value = peerAValue
-			newPeer, err := New(peerConfig)
+			peer, err := New(peerConfig)
 			if err != nil {
 				return maskAny(err)
 			}
-			peerA = newPeer
-			b, err := json.Marshal(newPeer)
+			peerA = peer
+			b, err := json.Marshal(peer)
 			if err != nil {
 				return maskAny(err)
 			}
@@ -278,12 +277,12 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 			peerConfig.ID = peerBID
 			peerConfig.Kind = KindPosition
 			peerConfig.Value = peerBValue
-			newPeer, err := New(peerConfig)
+			peer, err := New(peerConfig)
 			if err != nil {
 				return maskAny(err)
 			}
-			peerB = newPeer
-			b, err := json.Marshal(newPeer)
+			peerB = peer
+			b, err := json.Marshal(peer)
 			if err != nil {
 				return maskAny(err)
 			}
@@ -650,16 +649,32 @@ func (s *service) Search(peerValue string) (Peer, error) {
 		return nil, maskAny(err)
 	}
 
-	newPeer, err := New(DefaultConfig())
+	peer, err := New(DefaultConfig())
 	if err != nil {
 		return nil, maskAny(err)
 	}
-	err = json.Unmarshal([]byte(result), newPeer)
+	err = json.Unmarshal([]byte(result), peer)
 	if err != nil {
 		return nil, maskAny(err)
 	}
 
-	return newPeer, nil
+	return peer, nil
+}
+
+func (s *service) SearchByID(peerID string) (Peer, error) {
+	peerValue, err := s.index.Search(NamespaceID, s.Kind(), s.Kind(), peerID)
+	if index.IsNotFound(err) {
+		return nil, maskAnyf(notFoundError, peerValue)
+	} else if err != nil {
+		return nil, maskAny(err)
+	}
+
+	peer, err := s.Search(peerValue)
+	if err != nil {
+		return nil, maskAny(err)
+	}
+
+	return peer, nil
 }
 
 func (s *service) Shutdown() {
