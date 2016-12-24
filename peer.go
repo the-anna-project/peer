@@ -43,6 +43,9 @@ func New(config Config) (Peer, error) {
 	}
 
 	newPeer := &peer{
+		// Internals.
+		deprecated: false,
+
 		// Settings.
 		created: config.Created,
 		id:      config.ID,
@@ -54,6 +57,9 @@ func New(config Config) (Peer, error) {
 }
 
 type peer struct {
+	// Internals.
+	deprecated bool
+
 	// Settings.
 	created time.Time
 	id      string
@@ -65,12 +71,24 @@ func (p *peer) Created() time.Time {
 	return p.created
 }
 
+func (p *peer) Deprecated() bool {
+	return p.deprecated
+}
+
 func (p *peer) ID() string {
 	return p.id
 }
 
 func (p *peer) Kind() string {
 	return p.kind
+}
+
+func (p *peer) SetDeprecated(deprecated bool) {
+	p.deprecated = deprecated
+}
+
+func (p *peer) SetValue(value string) {
+	p.value = value
 }
 
 func (p *peer) Value() string {

@@ -3,7 +3,6 @@ package peer
 import (
 	"encoding/json"
 	"sync"
-	"time"
 
 	"github.com/the-anna-project/connection"
 	"github.com/the-anna-project/id"
@@ -201,6 +200,8 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 	// requested to be created, and peerB is its associated position peer.
 	var peerA Peer
 	var peerB Peer
+	var peerAID string
+	var peerBID string
 
 	var err error
 
@@ -217,171 +218,116 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 		return peerA, nil
 	}
 
-	// Create the peer IDs.
-	peerAID, err := s.id.New()
-	if err != nil {
-		return nil, maskAny(err)
-	}
-	peerBID, err := s.id.New()
-	if err != nil {
-		return nil, maskAny(err)
-	}
+	// Create the actual new peer and its new position peer and execute the list
+	// of actions asynchronously.
+	{
+		actions := []func(canceler <-chan struct{}) error{
+			// Create the actual peer. This will be a peer having a kind equal to the
+			// kind of the executing service. That means, e.g. an behaviour peer
+			// service implementation creates behaviour peers.
+			func(canceler <-chan struct{}) error {
+				peerAID, err = s.id.New()
+				if err != nil {
+					return maskAny(err)
+				}
 
-	createActions := []func(canceler <-chan struct{}) error{
-		// Create the actual peer.
-		func(canceler <-chan struct{}) error {
-			peerConfig := DefaultConfig()
-			peerConfig.Created = time.Now()
-			peerConfig.ID = peerAID
-			peerConfig.Kind = s.Kind()
-			peerConfig.Value = peerAValue
-			peer, err := New(peerConfig)
-			if err != nil {
-				return maskAny(err)
-			}
-			peerA = peer
-			b, err := json.Marshal(peer)
-			if err != nil {
-				return maskAny(err)
-			}
-			err = s.storage.Peer.Set(peerAID, string(b))
-			if err != nil {
-				return maskAny(err)
-			}
+				peerConfig := DefaultConfig()
+				peerConfig.ID = peerAID
+				peerConfig.Kind = s.Kind()
+				peerConfig.Value = peerAValue
+				peer, err := New(peerConfig)
+				if err != nil {
+					return maskAny(err)
+				}
+				peerA = peer
 
-			return nil
-		},
-		// Create the actual peer's position peer. Note that a peer's position is a
-		// peer itself.
-		func(canceler <-chan struct{}) error {
-			// In case the peer does not exist, we can go ahead to create it.
-			peerBValue, err := s.position.Default()
-			if err != nil {
-				return maskAny(err)
-			}
+				b, err := json.Marshal(peer)
+				if err != nil {
+					return maskAny(err)
+				}
+				err = s.storage.Peer.Set(peerAID, string(b))
+				if err != nil {
+					return maskAny(err)
+				}
 
-			peerB, err = s.Search(peerBValue)
-			if IsNotFound(err) {
-				// In case the peer requested to be created already exists, we don't
-				// need to do anything.
-			} else if err != nil {
-				return maskAny(err)
-			}
-			if peerB != nil {
-				peerBID = peerB.ID()
 				return nil
-			}
+			},
+			// Create the actual peer's position peer. Note that a peer's position
+			// peer is a usual peer itself, but having KindPosition. It represents the
+			// position of the actual peer within the connection space of the neural
+			// network.
+			func(canceler <-chan struct{}) error {
+				peerBID, err = s.id.New()
+				if err != nil {
+					return maskAny(err)
+				}
 
-			peerConfig := DefaultConfig()
-			peerConfig.Created = time.Now()
-			peerConfig.ID = peerBID
-			peerConfig.Kind = KindPosition
-			peerConfig.Value = peerBValue
-			peer, err := New(peerConfig)
-			if err != nil {
-				return maskAny(err)
-			}
-			peerB = peer
-			b, err := json.Marshal(peer)
-			if err != nil {
-				return maskAny(err)
-			}
-			err = s.storage.Peer.Set(peerBID, string(b))
-			if err != nil {
-				return maskAny(err)
-			}
+				// In case the peer does not exist, we can go ahead to create it.
+				peerBValue, err := s.position.Default()
+				if err != nil {
+					return maskAny(err)
+				}
 
-			return nil
-		},
+				peerB, err = s.Search(peerBValue)
+				if IsNotFound(err) {
+					// In case the peer requested to be created already exists, we don't
+					// need to do anything.
+				} else if err != nil {
+					return maskAny(err)
+				}
+				if peerB != nil {
+					peerBID = peerB.ID()
+					return nil
+				}
+
+				peerConfig := DefaultConfig()
+				peerConfig.ID = peerBID
+				peerConfig.Kind = KindPosition
+				peerConfig.Value = peerBValue
+				peer, err := New(peerConfig)
+				if err != nil {
+					return maskAny(err)
+				}
+				peerB = peer
+
+				b, err := json.Marshal(peerB)
+				if err != nil {
+					return maskAny(err)
+				}
+				err = s.storage.Peer.Set(peerBID, string(b))
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+		}
+
+		executeConfig := s.worker.ExecuteConfig()
+		executeConfig.Actions = actions
+		executeConfig.Canceler = s.closer
+		executeConfig.NumWorkers = len(actions)
+		err = s.worker.Execute(executeConfig)
+		if err != nil {
+			return nil, maskAny(err)
+		}
 	}
 
-	// Execute the list of create actions asynchronously.
-	executeConfig := s.worker.ExecuteConfig()
-	executeConfig.Actions = createActions
-	executeConfig.Canceler = s.closer
-	executeConfig.NumWorkers = len(createActions)
-	err = s.worker.Execute(executeConfig)
-	if err != nil {
-		return nil, maskAny(err)
-	}
+	// Connect the actual new peer with its new position peer and execute the list
+	// of actions asynchronously. This is used to connect the two given peers.
+	{
+		var actions []func(canceler <-chan struct{}) error
+		actions = append(actions, s.newIndexActions(peerA, peerB)...)
+		actions = append(actions, s.newConnectActions(peerA, peerB)...)
 
-	indexActions := []func(canceler <-chan struct{}) error{
-		// Create the index mapping between ID and value of peer A inside the
-		// namespace identified by the peer's kind. Here peer A is the peer
-		// requested to be created.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Create(NamespaceID, peerA.Kind(), peerA.Kind(), peerA.ID(), peerA.Value())
-			if err != nil {
-				return maskAny(err)
-			}
-
-			return nil
-		},
-		// Create the index mapping between ID and value of peer B inside the
-		// namespace identified by the peer's kind. Here peer B is the peer
-		// requested to be created.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Create(NamespaceID, peerB.Kind(), peerB.Kind(), peerB.ID(), peerB.Value())
-			if err != nil {
-				return maskAny(err)
-			}
-
-			return nil
-		},
-		// Create the index mapping between value and ID of peer A inside the
-		// namespace identified by the peer's kind. Here peer A is the peer
-		// requested to be created.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Create(NamespaceValue, peerA.Kind(), peerA.Kind(), peerA.Value(), peerA.ID())
-			if err != nil {
-				return maskAny(err)
-			}
-
-			return nil
-		},
-		// Create the index mapping between value and ID of peer B inside the
-		// namespace identified by the peer's kind. Here peer B is the peer
-		// requested to be created.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Create(NamespaceValue, peerB.Kind(), peerB.Kind(), peerB.Value(), peerB.ID())
-			if err != nil {
-				return maskAny(err)
-			}
-
-			return nil
-		},
-		// Create the connection between IDs of peer A and peer B. Here peer A is
-		// the peer requested to be created, and peer B is its associated position
-		// peer. This is a connection in one single direction.
-		func(canceler <-chan struct{}) error {
-			_, err := s.connection.Create(peerA.Kind(), peerB.Kind(), peerA.ID(), peerB.ID())
-			if err != nil {
-				return maskAny(err)
-			}
-
-			return nil
-		},
-		// Create the connection between IDs of peer B and peer A. Here peer A is
-		// the peer requested to be created, and peer B is its associated position
-		// peer. This is a connection in one single direction.
-		func(canceler <-chan struct{}) error {
-			_, err := s.connection.Create(peerB.Kind(), peerA.Kind(), peerB.ID(), peerA.ID())
-			if err != nil {
-				return maskAny(err)
-			}
-
-			return nil
-		},
-	}
-
-	// Execute the list of index actions asynchronously.
-	executeConfig = s.worker.ExecuteConfig()
-	executeConfig.Actions = indexActions
-	executeConfig.Canceler = s.closer
-	executeConfig.NumWorkers = len(indexActions)
-	err = s.worker.Execute(executeConfig)
-	if err != nil {
-		return nil, maskAny(err)
+		executeConfig := s.worker.ExecuteConfig()
+		executeConfig.Actions = actions
+		executeConfig.Canceler = s.closer
+		executeConfig.NumWorkers = len(actions)
+		err = s.worker.Execute(executeConfig)
+		if err != nil {
+			return nil, maskAny(err)
+		}
 	}
 
 	return peerA, nil
@@ -397,189 +343,169 @@ func (s *service) Delete(peerAValue string) error {
 	var peerAPeers []string
 	var peerBPeers []string
 
-	// Check if the peer exists, to make sure we actually have to do something.
-	ok, err := s.Exists(peerAValue)
-	if err != nil {
-		return maskAny(err)
-	}
-	if !ok {
+	var err error
+
+	// In case the peer requested to be deleted does not exist, we don't need to
+	// do anything but return without throwing an error to be idempotent.
+	peerA, err = s.Search(peerAValue)
+	if IsNotFound(err) {
 		return nil
+	} else if err != nil {
+		return maskAny(err)
 	}
-
-	searchActions := []func(canceler <-chan struct{}) error{
-		// Search for all the actual peer's associated peers.
-		func(canceler <-chan struct{}) error {
-			namespaces := [][]string{
-				[]string{peerA.Kind(), KindBehaviour},
-				[]string{peerA.Kind(), KindInformation},
-				[]string{peerA.Kind(), KindPosition},
-				[]string{KindBehaviour, peerA.Kind()},
-				[]string{KindInformation, peerA.Kind()},
-				[]string{KindPosition, peerA.Kind()},
-			}
-			for _, ns := range namespaces {
-				peers, err := s.connection.SearchPeers(ns[0], ns[1], peerA.ID())
-				if err != nil {
-					return maskAny(err)
-				}
-				peerAPeers = append(peerAPeers, peers...)
-			}
-
-			return nil
-		},
-		// Search for the actual peer's position and all its associated peers.
-		func(canceler <-chan struct{}) error {
-			peerB, err = s.Position(peerAValue)
-			if err != nil {
-				return maskAny(err)
-			}
-
-			namespaces := [][]string{
-				[]string{peerB.Kind(), KindBehaviour},
-				[]string{peerB.Kind(), KindInformation},
-				[]string{KindBehaviour, peerB.Kind()},
-				[]string{KindInformation, peerB.Kind()},
-			}
-			for _, ns := range namespaces {
-				peers, err := s.connection.SearchPeers(ns[0], ns[1], peerB.ID())
-				if err != nil {
-					return maskAny(err)
-				}
-				peerBPeers = append(peerBPeers, peers...)
-			}
-
-			return nil
-		},
-	}
-
-	// Execute the list of search actions asynchronously.
-	executeConfig := s.worker.ExecuteConfig()
-	executeConfig.Actions = searchActions
-	executeConfig.Canceler = s.closer
-	executeConfig.NumWorkers = len(searchActions)
-	err = s.worker.Execute(executeConfig)
+	peerB, err = s.Position(peerAValue)
 	if err != nil {
 		return maskAny(err)
 	}
 
-	deleteActions := []func(canceler <-chan struct{}) error{
-		// Delete the actual peer.
-		func(canceler <-chan struct{}) error {
-			err := s.storage.Peer.Remove(peerA.ID())
-			if err != nil {
-				return maskAny(err)
-			}
+	allNamespaces := s.allNamespaces(peerA)
 
-			return nil
-		},
-		// Delete the actual peer's position if not referenced by other peers.
-		func(canceler <-chan struct{}) error {
-			if len(peerBPeers) > 1 {
-				// In case the list of peers connected with the position peer  contains
-				// more than one peer, we stop here, because then other peers than the
-				// actual peer are still connected to this position. Other referenced
-				// peers must keep their position as it is. So we leave the position
-				// here untouched.
+	// Search for the actual peer with all its references and execute the list of
+	// actions asynchronously. This collects all necessary information to clean up
+	// the underlying storage in the next step.
+	{
+		actions := []func(canceler <-chan struct{}) error{
+			// Search for all the actual peer's associated peers.
+			func(canceler <-chan struct{}) error {
+				peerAPeers, err = s.searchAllPeers(peerA)
+				if err != nil {
+					return maskAny(err)
+				}
+
 				return nil
-			}
+			},
+			// Search for the actual peer's position and all its associated peers.
+			func(canceler <-chan struct{}) error {
+				peerBPeers, err = s.searchAllPeers(peerA)
+				if err != nil {
+					return maskAny(err)
+				}
 
-			err := s.storage.Peer.Remove(peerB.ID())
-			if err != nil {
-				return maskAny(err)
-			}
+				return nil
+			},
+		}
 
-			return nil
-		},
-		// Delete the connection between the actual peer and its associated
-		// position.
-		func(canceler <-chan struct{}) error {
-			err := s.connection.Delete(peerA.Kind(), peerB.Kind(), peerA.ID(), peerB.ID())
-			if err != nil {
-				return maskAny(err)
-			}
+		executeConfig := s.worker.ExecuteConfig()
+		executeConfig.Actions = actions
+		executeConfig.Canceler = s.closer
+		executeConfig.NumWorkers = len(actions)
+		err = s.worker.Execute(executeConfig)
+		if err != nil {
+			return maskAny(err)
+		}
+	}
 
-			return nil
-		},
-		// Delete the connection between the peer's position and the actual peer.
-		func(canceler <-chan struct{}) error {
-			err := s.connection.Delete(peerB.Kind(), peerA.Kind(), peerB.ID(), peerA.ID())
-			if err != nil {
-				return maskAny(err)
-			}
+	// Delete the actual peer with all its references and execute the list of
+	// actions asynchronously. This cleans up the underlying storage.
+	{
+		actions := []func(canceler <-chan struct{}) error{
+			// Delete the actual peer.
+			func(canceler <-chan struct{}) error {
+				err := s.storage.Peer.Remove(peerA.ID())
+				if err != nil {
+					return maskAny(err)
+				}
 
-			return nil
-		},
-		// Delete the connections between the actual peer and the peers it is
-		// connected to. This has to be done to not keep orphaned connections to
-		// peers that do not exist anymore.
-		func(canceler <-chan struct{}) error {
-			namespaces := [][]string{
-				[]string{peerA.Kind(), KindBehaviour},
-				[]string{peerA.Kind(), KindInformation},
-				[]string{KindBehaviour, peerA.Kind()},
-				[]string{KindInformation, peerA.Kind()},
-			}
+				return nil
+			},
+			// Delete the actual peer's position if not referenced by other peers.
+			func(canceler <-chan struct{}) error {
+				if len(peerBPeers) > 1 {
+					// In case the list of peers connected with the position peer  contains
+					// more than one peer, we stop here, because then other peers than the
+					// actual peer are still connected to this position. Other referenced
+					// peers must keep their position as it is. So we leave the position
+					// here untouched.
+					return nil
+				}
 
-			for _, peerID := range peerAPeers {
-				for _, ns := range namespaces {
-					err := s.connection.Delete(ns[0], ns[1], peerA.ID(), peerID)
-					if err != nil {
-						return maskAny(err)
+				err := s.storage.Peer.Remove(peerB.ID())
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			// Delete the connections between the actual peer and the peers it is
+			// connected to. This has to be done to not keep orphaned connections to
+			// peers that do not exist anymore.
+			func(canceler <-chan struct{}) error {
+				for _, peerID := range peerAPeers {
+					for _, ns := range allNamespaces {
+						err := s.connection.Delete(ns[0], ns[1], peerA.ID(), peerID)
+						if err != nil {
+							return maskAny(err)
+						}
 					}
 				}
-			}
 
-			return nil
-		},
-		// Delete the index mapping between the ID and value of peer A. Here peer A
-		// is the position peer of the peer actually requested to be deleted.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Delete(NamespaceID, peerA.Kind(), peerA.Kind(), peerA.ID())
-			if err != nil {
-				return maskAny(err)
-			}
+				return nil
+			},
+			// Delete the connections between the peers the actual peer is connected
+			// to and the actual. This has to be done to not keep orphaned connections
+			// to peers that do not exist anymore.
+			func(canceler <-chan struct{}) error {
+				for _, peerID := range peerAPeers {
+					for _, ns := range allNamespaces {
+						err := s.connection.Delete(ns[0], ns[1], peerID, peerA.ID())
+						if err != nil {
+							return maskAny(err)
+						}
+					}
+				}
 
-			return nil
-		},
-		// Delete the index mapping between the ID and value of peer B. Here peer B
-		// is the position peer of the peer actually requested to be deleted.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Delete(NamespaceID, peerB.Kind(), peerB.Kind(), peerB.ID())
-			if err != nil {
-				return maskAny(err)
-			}
+				return nil
+			},
+			// Delete the index mapping between the ID and value of peer A. Here peer A
+			// is the position peer of the peer actually requested to be deleted.
+			func(canceler <-chan struct{}) error {
+				err := s.index.Delete(NamespaceID, peerA.Kind(), peerA.Kind(), peerA.ID())
+				if err != nil {
+					return maskAny(err)
+				}
 
-			return nil
-		},
-		// Delete the index mapping between the value and ID of peer A. Here peer A
-		// is the position peer of the peer actually requested to be deleted.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Delete(NamespaceValue, peerA.Kind(), peerA.Kind(), peerA.Value())
-			if err != nil {
-				return maskAny(err)
-			}
+				return nil
+			},
+			// Delete the index mapping between the ID and value of peer B. Here peer B
+			// is the position peer of the peer actually requested to be deleted.
+			func(canceler <-chan struct{}) error {
+				err := s.index.Delete(NamespaceID, peerB.Kind(), peerB.Kind(), peerB.ID())
+				if err != nil {
+					return maskAny(err)
+				}
 
-			return nil
-		},
-		// Delete the index mapping between the value and ID of peer B. Here peer B
-		// is the position peer of the peer actually requested to be deleted.
-		func(canceler <-chan struct{}) error {
-			err := s.index.Delete(NamespaceValue, peerB.Kind(), peerB.Kind(), peerB.Value())
-			if err != nil {
-				return maskAny(err)
-			}
+				return nil
+			},
+			// Delete the index mapping between the value and ID of peer A. Here peer A
+			// is the position peer of the peer actually requested to be deleted.
+			func(canceler <-chan struct{}) error {
+				err := s.index.Delete(NamespaceValue, peerA.Kind(), peerA.Kind(), peerA.Value())
+				if err != nil {
+					return maskAny(err)
+				}
 
-			return nil
-		},
-	}
+				return nil
+			},
+			// Delete the index mapping between the value and ID of peer B. Here peer B
+			// is the position peer of the peer actually requested to be deleted.
+			func(canceler <-chan struct{}) error {
+				err := s.index.Delete(NamespaceValue, peerB.Kind(), peerB.Kind(), peerB.Value())
+				if err != nil {
+					return maskAny(err)
+				}
 
-	executeConfig = s.worker.ExecuteConfig()
-	executeConfig.Actions = deleteActions
-	executeConfig.Canceler = s.closer
-	executeConfig.NumWorkers = len(deleteActions)
-	err = s.worker.Execute(executeConfig)
-	if err != nil {
-		return maskAny(err)
+				return nil
+			},
+		}
+
+		executeConfig := s.worker.ExecuteConfig()
+		executeConfig.Actions = actions
+		executeConfig.Canceler = s.closer
+		executeConfig.NumWorkers = len(actions)
+		err = s.worker.Execute(executeConfig)
+		if err != nil {
+			return maskAny(err)
+		}
 	}
 
 	return nil
@@ -598,6 +524,149 @@ func (s *service) Exists(peerValue string) (bool, error) {
 
 func (s *service) Kind() string {
 	return s.kind
+}
+
+func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer, Peer, error) {
+	// Search for the actual peer which is requested to be mutated. Note that we
+	// here might return a not found error or a deprecated error. If we find a
+	// valid peer, this peer will be prepared to only act as proxy to its mutated
+	// peers until it is removed at some point.
+	peerA, err := s.Search(peerAValue)
+	if err != nil {
+		return nil, nil, maskAny(err)
+	}
+
+	// Define the function wide global peer variables, where newPeerA is the first
+	// peer resulting out of the mutation, and newPeerB is the second peer
+	// resulting out of the mutation.
+	var newPeerA Peer
+	var newPeerB Peer
+
+	// Create the two new peers resulting out of the mutation and execute the list
+	// of actions asynchronously. This is used to connect the two given peers.
+	{
+		actions := []func(canceler <-chan struct{}) error{
+			func(canceler <-chan struct{}) error {
+				newPeerA, err = s.Create(newPeerAValue)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			func(canceler <-chan struct{}) error {
+				newPeerB, err = s.Create(newPeerBValue)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+		}
+
+		executeConfig := s.worker.ExecuteConfig()
+		executeConfig.Actions = actions
+		executeConfig.Canceler = s.closer
+		executeConfig.NumWorkers = len(actions)
+		err = s.worker.Execute(executeConfig)
+		if err != nil {
+			return nil, nil, maskAny(err)
+		}
+	}
+
+	// Process the mutation asynchronously.
+	{
+		actions := []func(canceler <-chan struct{}) error{
+			// Connect the actual peer with the first new peer and execute the list of
+			// actions asynchronously. This is used to connect the two given peers.
+			func(canceler <-chan struct{}) error {
+				var actions []func(canceler <-chan struct{}) error
+				actions = append(actions, s.newIndexActions(peerA, newPeerA)...)
+				actions = append(actions, s.newConnectActions(peerA, newPeerA)...)
+
+				executeConfig := s.worker.ExecuteConfig()
+				executeConfig.Actions = actions
+				executeConfig.Canceler = s.closer
+				executeConfig.NumWorkers = len(actions)
+				err = s.worker.Execute(executeConfig)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			// Connect the first new peer with the second new peer and execute the
+			// list of actions asynchronously. This is used to connect the two given
+			// peers.
+			func(canceler <-chan struct{}) error {
+				var actions []func(canceler <-chan struct{}) error
+				actions = append(actions, s.newIndexActions(newPeerA, newPeerB)...)
+				actions = append(actions, s.newConnectActions(newPeerA, newPeerB)...)
+
+				executeConfig := s.worker.ExecuteConfig()
+				executeConfig.Actions = actions
+				executeConfig.Canceler = s.closer
+				executeConfig.NumWorkers = len(actions)
+				err = s.worker.Execute(executeConfig)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			// Lookup the connections of the peer which is requested to be mutated and
+			// apply them to the first peer resulting out of the mutation.
+			func(canceler <-chan struct{}) error {
+				err = s.movePeers(peerA, newPeerA)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			// Lookup the position of the peer which is requested to be mutated and
+			// apply it to the first peer resulting out of the mutation.
+			func(canceler <-chan struct{}) error {
+				err = s.movePosition(peerA, newPeerA)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			// Lookup the position of the peer which is requested to be mutated and
+			// apply it to the second peer resulting out of the mutation.
+			func(canceler <-chan struct{}) error {
+				err = s.movePosition(peerA, newPeerB)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+			// Mark the the peer which is requested to be mutated as deprecated and
+			// erase its actua value.
+			func(canceler <-chan struct{}) error {
+				err = s.markDeprecated(peerA)
+				if err != nil {
+					return maskAny(err)
+				}
+
+				return nil
+			},
+		}
+
+		executeConfig := s.worker.ExecuteConfig()
+		executeConfig.Actions = actions
+		executeConfig.Canceler = s.closer
+		executeConfig.NumWorkers = len(actions)
+		err = s.worker.Execute(executeConfig)
+		if err != nil {
+			return nil, nil, maskAny(err)
+		}
+	}
+
+	return newPeerA, newPeerB, nil
 }
 
 func (s *service) Position(peerAValue string) (Peer, error) {
@@ -681,4 +750,200 @@ func (s *service) Shutdown() {
 	s.shutdownOnce.Do(func() {
 		close(s.closer)
 	})
+}
+
+func (s *service) newConnectActions(peerA, peerB Peer) []func(canceler <-chan struct{}) error {
+	return []func(canceler <-chan struct{}) error{
+		// Create the connection between IDs of peer A and peer B. Here peer A is
+		// the peer requested to be created, and peer B is its associated position
+		// peer. This is a connection in one single direction.
+		func(canceler <-chan struct{}) error {
+			_, err := s.connection.Create(peerA.Kind(), peerB.Kind(), peerA.ID(), peerB.ID())
+			if err != nil {
+				return maskAny(err)
+			}
+
+			return nil
+		},
+		// Create the connection between IDs of peer B and peer A. Here peer A is
+		// the peer requested to be created, and peer B is its associated position
+		// peer. This is a connection in one single direction.
+		func(canceler <-chan struct{}) error {
+			_, err := s.connection.Create(peerB.Kind(), peerA.Kind(), peerB.ID(), peerA.ID())
+			if err != nil {
+				return maskAny(err)
+			}
+
+			return nil
+		},
+	}
+}
+
+func (s *service) newIndexActions(peerA, peerB Peer) []func(canceler <-chan struct{}) error {
+	return []func(canceler <-chan struct{}) error{
+		// Create the index mapping between ID and value of peer A inside the
+		// namespace identified by the peer's kind. Here peer A is the peer
+		// requested to be created.
+		func(canceler <-chan struct{}) error {
+			err := s.index.Create(NamespaceID, peerA.Kind(), peerA.Kind(), peerA.ID(), peerA.Value())
+			if err != nil {
+				return maskAny(err)
+			}
+
+			return nil
+		},
+		// Create the index mapping between ID and value of peer B inside the
+		// namespace identified by the peer's kind. Here peer B is the peer
+		// requested to be created.
+		func(canceler <-chan struct{}) error {
+			err := s.index.Create(NamespaceID, peerB.Kind(), peerB.Kind(), peerB.ID(), peerB.Value())
+			if err != nil {
+				return maskAny(err)
+			}
+
+			return nil
+		},
+		// Create the index mapping between value and ID of peer A inside the
+		// namespace identified by the peer's kind. Here peer A is the peer
+		// requested to be created.
+		func(canceler <-chan struct{}) error {
+			err := s.index.Create(NamespaceValue, peerA.Kind(), peerA.Kind(), peerA.Value(), peerA.ID())
+			if err != nil {
+				return maskAny(err)
+			}
+
+			return nil
+		},
+		// Create the index mapping between value and ID of peer B inside the
+		// namespace identified by the peer's kind. Here peer B is the peer
+		// requested to be created.
+		func(canceler <-chan struct{}) error {
+			err := s.index.Create(NamespaceValue, peerB.Kind(), peerB.Kind(), peerB.Value(), peerB.ID())
+			if err != nil {
+				return maskAny(err)
+			}
+
+			return nil
+		},
+	}
+}
+
+// allNamespaces returns a list of all combinations of all possible namespaces.
+// This includes the position namespace and all reverse combinations.
+func (s *service) allNamespaces(peerA Peer) [][]string {
+	return [][]string{
+		[]string{peerA.Kind(), KindBehaviour},
+		[]string{peerA.Kind(), KindInformation},
+		[]string{peerA.Kind(), KindPosition},
+		[]string{KindBehaviour, peerA.Kind()},
+		[]string{KindInformation, peerA.Kind()},
+		[]string{KindPosition, peerA.Kind()},
+	}
+}
+
+// searchAllPeers looks up all connected peers of the given peers. Therefore all
+// namespaces are searched.
+func (s *service) searchAllPeers(peerA Peer) ([]string, error) {
+	var allPeers []string
+
+	for _, ns := range s.allNamespaces(peerA) {
+		peers, err := s.connection.SearchPeers(ns[0], ns[1], peerA.ID())
+		if connection.IsNotFound(err) {
+			// We lookup all possible combinations of namespaces. There might be
+			// no peers for some namespace combinations. So we can savely ignore
+			// the error and go ahead looking for the next.
+			continue
+		} else if err != nil {
+			return nil, maskAny(err)
+		}
+		allPeers = append(allPeers, peers...)
+	}
+
+	return allPeers, nil
+}
+
+// movePeers applies the connections of peerA to peerB.
+func (s *service) movePeers(peerA, peerB Peer) error {
+	namespaces := [][]string{
+		[]string{peerA.Kind(), KindBehaviour},
+		[]string{peerA.Kind(), KindInformation},
+	}
+
+	for _, ns := range namespaces {
+		peers, err := s.connection.SearchPeers(ns[0], ns[1], peerA.ID())
+		if connection.IsNotFound(err) {
+			// We lookup all possible combinations of namespaces. There might be
+			// no peers for some namespace combinations. So we can savely ignore
+			// the error and go ahead looking for the next.
+			continue
+		} else if err != nil {
+			return maskAny(err)
+		}
+
+		for _, peerID := range peers {
+			_, err := s.connection.Create(ns[0], ns[1], peerB.ID(), peerID)
+			if err != nil {
+				return maskAny(err)
+			}
+		}
+		for _, peerID := range peers {
+			_, err := s.connection.Create(ns[1], ns[0], peerID, peerB.ID())
+			if err != nil {
+				return maskAny(err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// markDeprecated marks the given peer as being deprecated and erases its value.
+func (s *service) markDeprecated(peerA Peer) error {
+	// Mark the given peer as being deprecated and erase its value.
+	peerA.SetDeprecated(true)
+	peerA.SetValue("")
+
+	// Store the updated peer.
+	b, err := json.Marshal(peerA)
+	if err != nil {
+		return maskAny(err)
+	}
+	err = s.storage.Peer.Set(peerA.ID(), string(b))
+	if err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// movePosition applies the position value of the position peer of peerA to the
+// position peer of peerB.
+func (s *service) movePosition(peerA, peerB Peer) error {
+	// Fetch the position peer of the peer requested to be used to update the
+	// position of the other peer.
+	positionA, err := s.Position(peerA.Value())
+	if err != nil {
+		return maskAny(err)
+	}
+
+	// Fetch the position peer of the peer requested to get its position updated.
+	positionB, err := s.Position(peerB.Value())
+	if err != nil {
+		return maskAny(err)
+	}
+
+	// Update the position peer value.
+	positionB.SetValue(positionA.Value())
+
+	// Store the updated position peer.
+	b, err := json.Marshal(positionB)
+	if err != nil {
+		return maskAny(err)
+	}
+	err = s.storage.Peer.Set(positionB.ID(), string(b))
+	if err != nil {
+		return maskAny(err)
+	}
+
+	return nil
 }
