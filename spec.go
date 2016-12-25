@@ -81,6 +81,7 @@ type Service interface {
 	// identified peer are cleaned up.
 	Delete(peerAValue string) error
 	// Exists checks whether the peer identified by the given peer value exists.
+	// Exists returns also true in case the peer being looked up is deprecated.
 	Exists(peerAValue string) (bool, error)
 	// Kind returns the kind of the current service implementation. This must be
 	// either KindBehaviour or KindInformation.

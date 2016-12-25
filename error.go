@@ -29,6 +29,13 @@ func IsAlreadyExists(err error) bool {
 	return errgo.Cause(err) == alreadyExistsError
 }
 
+var deprecatedError = errgo.New("deprecated")
+
+// IsDeprecated asserts deprecatedError.
+func IsDeprecated(err error) bool {
+	return errgo.Cause(err) == deprecatedError
+}
+
 var invalidConfigError = errgo.New("invalid config")
 
 // IsInvalidConfig asserts invalidConfigError.

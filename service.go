@@ -346,8 +346,12 @@ func (s *service) Delete(peerAValue string) error {
 	var err error
 
 	// In case the peer requested to be deleted does not exist, we don't need to
-	// do anything but return without throwing an error to be idempotent.
-	peerA, err = s.Search(peerAValue)
+	// do anything but return without throwing an error to be idempotent. In case
+	// a deprecated peer is requested to be deleted we do not want to deal with
+	// the deprecated error. That is why we have to use the private Service.search
+	// method, because the public Service.Search throws the deprecated error and
+	// does not return the deprecated peer.
+	peerA, err = s.search(peerAValue)
 	if IsNotFound(err) {
 		return nil
 	} else if err != nil {
@@ -515,6 +519,8 @@ func (s *service) Exists(peerValue string) (bool, error) {
 	_, err := s.Search(peerValue)
 	if IsNotFound(err) {
 		return false, nil
+	} else if IsDeprecated(err) {
+		return true, nil
 	} else if err != nil {
 		return false, maskAny(err)
 	}
@@ -670,7 +676,12 @@ func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer,
 }
 
 func (s *service) Position(peerAValue string) (Peer, error) {
-	peerA, err := s.Search(peerAValue)
+	// We lookup the peer we want to find its position for. In case a deprecated
+	// peer is lookued up, we do not want to deal with the deprecated error. That
+	// is why we have to use the private Service.search method, because the public
+	// Service.Search throws the deprecated error and does not return the
+	// deprecated peer.
+	peerA, err := s.search(peerAValue)
 	if err != nil {
 		return nil, maskAny(err)
 	}
@@ -706,6 +717,20 @@ func (s *service) Position(peerAValue string) (Peer, error) {
 }
 
 func (s *service) Search(peerValue string) (Peer, error) {
+	peer, err := s.search(peerValue)
+	if err != nil {
+		return nil, maskAny(err)
+	}
+
+	if peer.Deprecated() {
+		return nil, maskAnyf(deprecatedError, peerValue)
+	}
+
+	return peer, nil
+}
+
+// search looks up the peer associated to the given peer value.
+func (s *service) search(peerValue string) (Peer, error) {
 	peerID, err := s.index.Search(NamespaceValue, s.Kind(), s.Kind(), peerValue)
 	if index.IsNotFound(err) {
 		return nil, maskAnyf(notFoundError, peerValue)
@@ -830,24 +855,24 @@ func (s *service) newIndexActions(peerA, peerB Peer) []func(canceler <-chan stru
 
 // allNamespaces returns a list of all combinations of all possible namespaces.
 // This includes the position namespace and all reverse combinations.
-func (s *service) allNamespaces(peerA Peer) [][]string {
+func (s *service) allNamespaces(peer Peer) [][]string {
 	return [][]string{
-		[]string{peerA.Kind(), KindBehaviour},
-		[]string{peerA.Kind(), KindInformation},
-		[]string{peerA.Kind(), KindPosition},
-		[]string{KindBehaviour, peerA.Kind()},
-		[]string{KindInformation, peerA.Kind()},
-		[]string{KindPosition, peerA.Kind()},
+		[]string{peer.Kind(), KindBehaviour},
+		[]string{peer.Kind(), KindInformation},
+		[]string{peer.Kind(), KindPosition},
+		[]string{KindBehaviour, peer.Kind()},
+		[]string{KindInformation, peer.Kind()},
+		[]string{KindPosition, peer.Kind()},
 	}
 }
 
 // searchAllPeers looks up all connected peers of the given peers. Therefore all
 // namespaces are searched.
-func (s *service) searchAllPeers(peerA Peer) ([]string, error) {
+func (s *service) searchAllPeers(peer Peer) ([]string, error) {
 	var allPeers []string
 
-	for _, ns := range s.allNamespaces(peerA) {
-		peers, err := s.connection.SearchPeers(ns[0], ns[1], peerA.ID())
+	for _, ns := range s.allNamespaces(peer) {
+		peers, err := s.connection.SearchPeers(ns[0], ns[1], peer.ID())
 		if connection.IsNotFound(err) {
 			// We lookup all possible combinations of namespaces. There might be
 			// no peers for some namespace combinations. So we can savely ignore
@@ -898,17 +923,17 @@ func (s *service) movePeers(peerA, peerB Peer) error {
 }
 
 // markDeprecated marks the given peer as being deprecated and erases its value.
-func (s *service) markDeprecated(peerA Peer) error {
+func (s *service) markDeprecated(peer Peer) error {
 	// Mark the given peer as being deprecated and erase its value.
-	peerA.SetDeprecated(true)
-	peerA.SetValue("")
+	peer.SetDeprecated(true)
+	peer.SetValue("")
 
 	// Store the updated peer.
-	b, err := json.Marshal(peerA)
+	b, err := json.Marshal(peer)
 	if err != nil {
 		return maskAny(err)
 	}
-	err = s.storage.Peer.Set(peerA.ID(), string(b))
+	err = s.storage.Peer.Set(peer.ID(), string(b))
 	if err != nil {
 		return maskAny(err)
 	}
