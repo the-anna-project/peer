@@ -107,6 +107,9 @@ type Service interface {
 	// initially referenced peer. This behaviour applies to all kind of peers,
 	// whether they are of the kind KindBehaviour or KindInformation.
 	Position(peerAValue string) (Peer, error)
+	// Random searches for a random peer of the connection space and returns it.
+	// The returned peer is never deprecated.
+	Random() (Peer, error)
 	// Search looks up the peer identified by the given peer value. Therefore the
 	// given peer value is used to resolve the actual peer ID. The mapping between
 	// peer values and peer IDs is managemed by the index service. Note that

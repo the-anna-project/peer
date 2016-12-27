@@ -716,6 +716,40 @@ func (s *service) Position(peerAValue string) (Peer, error) {
 	return peerB, nil
 }
 
+func (s *service) Random() (Peer, error) {
+	var count int
+
+	for {
+		// Make sure we only try finding a random peer to a certain extend.
+		count++
+		if count > 10 {
+			return nil, maskAnyf(notFoundError, "no valid random peer exists")
+		}
+
+		// Look for a random key within the peer storage. We store peers using their
+		// plain peer ID. That is why we can easily use the storage's Random method.
+		result, err := s.storage.Peer.GetRandom()
+		if err != nil {
+			return nil, maskAny(err)
+		}
+
+		// Use the random key to fetch the associated peer.
+		peer, err := s.SearchByID(result)
+		if err != nil {
+			return nil, maskAny(err)
+		}
+
+		// We do not want to return deprecated peers, so we continue to find a valid
+		// peer for the requestor.
+		if peer.Deprecated() {
+			continue
+		}
+
+		// We found a valid peer, so we go with it.
+		return peer, nil
+	}
+}
+
 func (s *service) Search(peerValue string) (Peer, error) {
 	peer, err := s.search(peerValue)
 	if err != nil {
@@ -724,32 +758,6 @@ func (s *service) Search(peerValue string) (Peer, error) {
 
 	if peer.Deprecated() {
 		return nil, maskAnyf(deprecatedError, peerValue)
-	}
-
-	return peer, nil
-}
-
-// search looks up the peer associated to the given peer value.
-func (s *service) search(peerValue string) (Peer, error) {
-	peerID, err := s.index.Search(NamespaceValue, s.Kind(), s.Kind(), peerValue)
-	if index.IsNotFound(err) {
-		return nil, maskAnyf(notFoundError, peerValue)
-	} else if err != nil {
-		return nil, maskAny(err)
-	}
-
-	result, err := s.storage.Peer.Get(peerID)
-	if err != nil {
-		return nil, maskAny(err)
-	}
-
-	peer, err := New(DefaultConfig())
-	if err != nil {
-		return nil, maskAny(err)
-	}
-	err = json.Unmarshal([]byte(result), peer)
-	if err != nil {
-		return nil, maskAny(err)
 	}
 
 	return peer, nil
@@ -775,6 +783,105 @@ func (s *service) Shutdown() {
 	s.shutdownOnce.Do(func() {
 		close(s.closer)
 	})
+}
+
+// allNamespaces returns a list of all combinations of all possible namespaces.
+// This includes the position namespace and all reverse combinations.
+func (s *service) allNamespaces(peer Peer) [][]string {
+	return [][]string{
+		[]string{peer.Kind(), KindBehaviour},
+		[]string{peer.Kind(), KindInformation},
+		[]string{peer.Kind(), KindPosition},
+		[]string{KindBehaviour, peer.Kind()},
+		[]string{KindInformation, peer.Kind()},
+		[]string{KindPosition, peer.Kind()},
+	}
+}
+
+// markDeprecated marks the given peer as being deprecated and erases its value.
+func (s *service) markDeprecated(peer Peer) error {
+	// Mark the given peer as being deprecated and erase its value.
+	peer.SetDeprecated(true)
+	peer.SetValue("")
+
+	// Store the updated peer.
+	b, err := json.Marshal(peer)
+	if err != nil {
+		return maskAny(err)
+	}
+	err = s.storage.Peer.Set(peer.ID(), string(b))
+	if err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// movePeers applies the connections of peerA to peerB.
+func (s *service) movePeers(peerA, peerB Peer) error {
+	namespaces := [][]string{
+		[]string{peerA.Kind(), KindBehaviour},
+		[]string{peerA.Kind(), KindInformation},
+	}
+
+	for _, ns := range namespaces {
+		peers, err := s.connection.SearchPeers(ns[0], ns[1], peerA.ID())
+		if connection.IsNotFound(err) {
+			// We lookup all possible combinations of namespaces. There might be
+			// no peers for some namespace combinations. So we can savely ignore
+			// the error and go ahead looking for the next.
+			continue
+		} else if err != nil {
+			return maskAny(err)
+		}
+
+		for _, peerID := range peers {
+			_, err := s.connection.Create(ns[0], ns[1], peerB.ID(), peerID)
+			if err != nil {
+				return maskAny(err)
+			}
+		}
+		for _, peerID := range peers {
+			_, err := s.connection.Create(ns[1], ns[0], peerID, peerB.ID())
+			if err != nil {
+				return maskAny(err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// movePosition applies the position value of the position peer of peerA to the
+// position peer of peerB.
+func (s *service) movePosition(peerA, peerB Peer) error {
+	// Fetch the position peer of the peer requested to be used to update the
+	// position of the other peer.
+	positionA, err := s.Position(peerA.Value())
+	if err != nil {
+		return maskAny(err)
+	}
+
+	// Fetch the position peer of the peer requested to get its position updated.
+	positionB, err := s.Position(peerB.Value())
+	if err != nil {
+		return maskAny(err)
+	}
+
+	// Update the position peer value.
+	positionB.SetValue(positionA.Value())
+
+	// Store the updated position peer.
+	b, err := json.Marshal(positionB)
+	if err != nil {
+		return maskAny(err)
+	}
+	err = s.storage.Peer.Set(positionB.ID(), string(b))
+	if err != nil {
+		return maskAny(err)
+	}
+
+	return nil
 }
 
 func (s *service) newConnectActions(peerA, peerB Peer) []func(canceler <-chan struct{}) error {
@@ -853,17 +960,30 @@ func (s *service) newIndexActions(peerA, peerB Peer) []func(canceler <-chan stru
 	}
 }
 
-// allNamespaces returns a list of all combinations of all possible namespaces.
-// This includes the position namespace and all reverse combinations.
-func (s *service) allNamespaces(peer Peer) [][]string {
-	return [][]string{
-		[]string{peer.Kind(), KindBehaviour},
-		[]string{peer.Kind(), KindInformation},
-		[]string{peer.Kind(), KindPosition},
-		[]string{KindBehaviour, peer.Kind()},
-		[]string{KindInformation, peer.Kind()},
-		[]string{KindPosition, peer.Kind()},
+// search looks up the peer associated to the given peer value.
+func (s *service) search(peerValue string) (Peer, error) {
+	peerID, err := s.index.Search(NamespaceValue, s.Kind(), s.Kind(), peerValue)
+	if index.IsNotFound(err) {
+		return nil, maskAnyf(notFoundError, peerValue)
+	} else if err != nil {
+		return nil, maskAny(err)
 	}
+
+	result, err := s.storage.Peer.Get(peerID)
+	if err != nil {
+		return nil, maskAny(err)
+	}
+
+	peer, err := New(DefaultConfig())
+	if err != nil {
+		return nil, maskAny(err)
+	}
+	err = json.Unmarshal([]byte(result), peer)
+	if err != nil {
+		return nil, maskAny(err)
+	}
+
+	return peer, nil
 }
 
 // searchAllPeers looks up all connected peers of the given peers. Therefore all
@@ -885,90 +1005,4 @@ func (s *service) searchAllPeers(peer Peer) ([]string, error) {
 	}
 
 	return allPeers, nil
-}
-
-// movePeers applies the connections of peerA to peerB.
-func (s *service) movePeers(peerA, peerB Peer) error {
-	namespaces := [][]string{
-		[]string{peerA.Kind(), KindBehaviour},
-		[]string{peerA.Kind(), KindInformation},
-	}
-
-	for _, ns := range namespaces {
-		peers, err := s.connection.SearchPeers(ns[0], ns[1], peerA.ID())
-		if connection.IsNotFound(err) {
-			// We lookup all possible combinations of namespaces. There might be
-			// no peers for some namespace combinations. So we can savely ignore
-			// the error and go ahead looking for the next.
-			continue
-		} else if err != nil {
-			return maskAny(err)
-		}
-
-		for _, peerID := range peers {
-			_, err := s.connection.Create(ns[0], ns[1], peerB.ID(), peerID)
-			if err != nil {
-				return maskAny(err)
-			}
-		}
-		for _, peerID := range peers {
-			_, err := s.connection.Create(ns[1], ns[0], peerID, peerB.ID())
-			if err != nil {
-				return maskAny(err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// markDeprecated marks the given peer as being deprecated and erases its value.
-func (s *service) markDeprecated(peer Peer) error {
-	// Mark the given peer as being deprecated and erase its value.
-	peer.SetDeprecated(true)
-	peer.SetValue("")
-
-	// Store the updated peer.
-	b, err := json.Marshal(peer)
-	if err != nil {
-		return maskAny(err)
-	}
-	err = s.storage.Peer.Set(peer.ID(), string(b))
-	if err != nil {
-		return maskAny(err)
-	}
-
-	return nil
-}
-
-// movePosition applies the position value of the position peer of peerA to the
-// position peer of peerB.
-func (s *service) movePosition(peerA, peerB Peer) error {
-	// Fetch the position peer of the peer requested to be used to update the
-	// position of the other peer.
-	positionA, err := s.Position(peerA.Value())
-	if err != nil {
-		return maskAny(err)
-	}
-
-	// Fetch the position peer of the peer requested to get its position updated.
-	positionB, err := s.Position(peerB.Value())
-	if err != nil {
-		return maskAny(err)
-	}
-
-	// Update the position peer value.
-	positionB.SetValue(positionA.Value())
-
-	// Store the updated position peer.
-	b, err := json.Marshal(positionB)
-	if err != nil {
-		return maskAny(err)
-	}
-	err = s.storage.Peer.Set(positionB.ID(), string(b))
-	if err != nil {
-		return maskAny(err)
-	}
-
-	return nil
 }
