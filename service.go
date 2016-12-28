@@ -779,6 +779,35 @@ func (s *service) SearchByID(peerID string) (Peer, error) {
 	return peer, nil
 }
 
+func (s *service) SearchPath(peerValues ...string) ([]Peer, error) {
+	var peers []Peer
+
+	for i, v := range peerValues {
+		peer, err := s.Search(v)
+		if err != nil {
+			return nil, maskAny(err)
+		}
+		peers = append(peers, peer)
+
+		if i == 0 {
+			continue
+		}
+
+		peerA := peers[i-1]
+		peerB := peers[i]
+
+		ok, err := s.connection.Exists(peerA.Kind(), peerB.Kind(), peerA.ID(), peerB.ID())
+		if err != nil {
+			return nil, maskAny(err)
+		}
+		if !ok {
+			return nil, maskAnyf(notFoundError, "%#v", peerValues)
+		}
+	}
+
+	return peers, nil
+}
+
 func (s *service) Shutdown() {
 	s.shutdownOnce.Do(func() {
 		close(s.closer)

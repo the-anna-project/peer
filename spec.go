@@ -125,6 +125,17 @@ type Service interface {
 	// SearchByID is like Search, with the exception that it uses a peer's ID for
 	// the initial index lookup.
 	SearchByID(peerAID string) (Peer, error)
+	// SearchPath looks up the chain of peers associated with the given list of
+	// peer values, if any. Imagine having the following information peer values.
+	//
+	//     "the" " " "dog"
+	//
+	// Here the information peer values form a chain in which the direct
+	// neighbours are connected.
+	//
+	// SearchPath may never be used in combination with peers of kind
+	// KindBehaviour.
+	SearchPath(peerValues ...string) ([]Peer, error)
 	// Shutdown ends all processes of the service like shutting down a machine.
 	// The call to Shutdown blocks until the service is completely shut down, so
 	// you might want to call it in a separate goroutine.
