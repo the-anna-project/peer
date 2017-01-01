@@ -8,7 +8,7 @@ import (
 	"github.com/the-anna-project/id"
 	"github.com/the-anna-project/index"
 	"github.com/the-anna-project/position"
-	storagecollection "github.com/the-anna-project/storage/collection"
+	"github.com/the-anna-project/storage"
 	"github.com/the-anna-project/worker"
 )
 
@@ -38,7 +38,7 @@ type ServiceConfig struct {
 	IDService         id.Service
 	IndexService      index.Service
 	PositionService   position.Service
-	StorageCollection *storagecollection.Collection
+	StorageCollection *storage.Collection
 	WorkerService     worker.Service
 
 	// Settings.
@@ -86,10 +86,10 @@ func DefaultServiceConfig() ServiceConfig {
 		}
 	}
 
-	var storageCollection *storagecollection.Collection
+	var storageCollection *storage.Collection
 	{
-		storageConfig := storagecollection.DefaultConfig()
-		storageCollection, err = storagecollection.New(storageConfig)
+		storageConfig := storage.DefaultCollectionConfig()
+		storageCollection, err = storage.NewCollection(storageConfig)
 		if err != nil {
 			panic(err)
 		}
@@ -177,7 +177,7 @@ type service struct {
 	id         id.Service
 	index      index.Service
 	position   position.Service
-	storage    *storagecollection.Collection
+	storage    *storage.Collection
 	worker     worker.Service
 
 	// Internals.

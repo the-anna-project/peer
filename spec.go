@@ -132,9 +132,6 @@ type Service interface {
 	//
 	// Here the information peer values form a chain in which the direct
 	// neighbours are connected.
-	//
-	// SearchPath may never be used in combination with peers of kind
-	// KindBehaviour.
 	SearchPath(peerValues ...string) ([]Peer, error)
 	// Shutdown ends all processes of the service like shutting down a machine.
 	// The call to Shutdown blocks until the service is completely shut down, so
