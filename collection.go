@@ -1,6 +1,8 @@
 package peer
 
-import "sync"
+import (
+	"sync"
+)
 
 // CollectionConfig represents the configuration used to create a new peer
 // collection.

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/the-anna-project/connection"
+	"github.com/the-anna-project/context"
 	"github.com/the-anna-project/id"
 	"github.com/the-anna-project/index"
 	"github.com/the-anna-project/position"
@@ -195,7 +196,7 @@ func (s *service) Boot() {
 	})
 }
 
-func (s *service) Create(peerAValue string) (Peer, error) {
+func (s *service) Create(ctx context.Context, peerAValue string) (Peer, error) {
 	// Define the function wide global peer variables, where peerA is the peer
 	// requested to be created, and peerB is its associated position peer.
 	var peerA Peer
@@ -207,7 +208,7 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 
 	// In case the peer requested to be created already exists, we don't need to
 	// do anything but return it.
-	peerA, err = s.Search(peerAValue)
+	peerA, err = s.Search(ctx, peerAValue)
 	if IsNotFound(err) {
 		// In case the peer does not exist, we can go ahead to create it.
 	} else if err != nil {
@@ -268,7 +269,7 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 					return maskAny(err)
 				}
 
-				peerB, err = s.Search(peerBValue)
+				peerB, err = s.Search(ctx, peerBValue)
 				if IsNotFound(err) {
 					// In case the peer requested to be created already exists, we don't
 					// need to do anything.
@@ -333,7 +334,7 @@ func (s *service) Create(peerAValue string) (Peer, error) {
 	return peerA, nil
 }
 
-func (s *service) Delete(peerAValue string) error {
+func (s *service) Delete(ctx context.Context, peerAValue string) error {
 	// Define the function wide global peer variables, where peerA is the peer
 	// requested to be deleted, and peerB is its associated position peer. Further
 	// we track the list of peers that are connected with peerA and peerB.
@@ -351,13 +352,13 @@ func (s *service) Delete(peerAValue string) error {
 	// the deprecated error. That is why we have to use the private Service.search
 	// method, because the public Service.Search throws the deprecated error and
 	// does not return the deprecated peer.
-	peerA, err = s.search(peerAValue)
+	peerA, err = s.search(ctx, peerAValue)
 	if IsNotFound(err) {
 		return nil
 	} else if err != nil {
 		return maskAny(err)
 	}
-	peerB, err = s.Position(peerAValue)
+	peerB, err = s.Position(ctx, peerAValue)
 	if err != nil {
 		return maskAny(err)
 	}
@@ -515,8 +516,8 @@ func (s *service) Delete(peerAValue string) error {
 	return nil
 }
 
-func (s *service) Exists(peerValue string) (bool, error) {
-	_, err := s.Search(peerValue)
+func (s *service) Exists(ctx context.Context, peerValue string) (bool, error) {
+	_, err := s.Search(ctx, peerValue)
 	if IsNotFound(err) {
 		return false, nil
 	} else if IsDeprecated(err) {
@@ -532,12 +533,12 @@ func (s *service) Kind() string {
 	return s.kind
 }
 
-func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer, Peer, error) {
+func (s *service) Mutate(ctx context.Context, peerAValue, newPeerAValue, newPeerBValue string) (Peer, Peer, error) {
 	// Search for the actual peer which is requested to be mutated. Note that we
 	// here might return a not found error or a deprecated error. If we find a
 	// valid peer, this peer will be prepared to only act as proxy to its mutated
 	// peers until it is removed at some point.
-	peerA, err := s.Search(peerAValue)
+	peerA, err := s.Search(ctx, peerAValue)
 	if err != nil {
 		return nil, nil, maskAny(err)
 	}
@@ -553,7 +554,7 @@ func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer,
 	{
 		actions := []func(canceler <-chan struct{}) error{
 			func(canceler <-chan struct{}) error {
-				newPeerA, err = s.Create(newPeerAValue)
+				newPeerA, err = s.Create(ctx, newPeerAValue)
 				if err != nil {
 					return maskAny(err)
 				}
@@ -561,7 +562,7 @@ func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer,
 				return nil
 			},
 			func(canceler <-chan struct{}) error {
-				newPeerB, err = s.Create(newPeerBValue)
+				newPeerB, err = s.Create(ctx, newPeerBValue)
 				if err != nil {
 					return maskAny(err)
 				}
@@ -633,7 +634,7 @@ func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer,
 			// Lookup the position of the peer which is requested to be mutated and
 			// apply it to the first peer resulting out of the mutation.
 			func(canceler <-chan struct{}) error {
-				err = s.movePosition(peerA, newPeerA)
+				err = s.movePosition(ctx, peerA, newPeerA)
 				if err != nil {
 					return maskAny(err)
 				}
@@ -643,7 +644,7 @@ func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer,
 			// Lookup the position of the peer which is requested to be mutated and
 			// apply it to the second peer resulting out of the mutation.
 			func(canceler <-chan struct{}) error {
-				err = s.movePosition(peerA, newPeerB)
+				err = s.movePosition(ctx, peerA, newPeerB)
 				if err != nil {
 					return maskAny(err)
 				}
@@ -675,13 +676,13 @@ func (s *service) Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer,
 	return newPeerA, newPeerB, nil
 }
 
-func (s *service) Position(peerAValue string) (Peer, error) {
+func (s *service) Position(ctx context.Context, peerAValue string) (Peer, error) {
 	// We lookup the peer we want to find its position for. In case a deprecated
 	// peer is lookued up, we do not want to deal with the deprecated error. That
 	// is why we have to use the private Service.search method, because the public
 	// Service.Search throws the deprecated error and does not return the
 	// deprecated peer.
-	peerA, err := s.search(peerAValue)
+	peerA, err := s.search(ctx, peerAValue)
 	if err != nil {
 		return nil, maskAny(err)
 	}
@@ -716,7 +717,7 @@ func (s *service) Position(peerAValue string) (Peer, error) {
 	return peerB, nil
 }
 
-func (s *service) Random() (Peer, error) {
+func (s *service) Random(ctx context.Context) (Peer, error) {
 	var count int
 
 	for {
@@ -734,7 +735,7 @@ func (s *service) Random() (Peer, error) {
 		}
 
 		// Use the random key to fetch the associated peer.
-		peer, err := s.SearchByID(result)
+		peer, err := s.SearchByID(ctx, result)
 		if err != nil {
 			return nil, maskAny(err)
 		}
@@ -750,8 +751,8 @@ func (s *service) Random() (Peer, error) {
 	}
 }
 
-func (s *service) Search(peerValue string) (Peer, error) {
-	peer, err := s.search(peerValue)
+func (s *service) Search(ctx context.Context, peerValue string) (Peer, error) {
+	peer, err := s.search(ctx, peerValue)
 	if err != nil {
 		return nil, maskAny(err)
 	}
@@ -763,7 +764,7 @@ func (s *service) Search(peerValue string) (Peer, error) {
 	return peer, nil
 }
 
-func (s *service) SearchByID(peerID string) (Peer, error) {
+func (s *service) SearchByID(ctx context.Context, peerID string) (Peer, error) {
 	peerValue, err := s.index.Search(NamespaceID, s.Kind(), s.Kind(), peerID)
 	if index.IsNotFound(err) {
 		return nil, maskAnyf(notFoundError, peerValue)
@@ -771,7 +772,7 @@ func (s *service) SearchByID(peerID string) (Peer, error) {
 		return nil, maskAny(err)
 	}
 
-	peer, err := s.Search(peerValue)
+	peer, err := s.Search(ctx, peerValue)
 	if err != nil {
 		return nil, maskAny(err)
 	}
@@ -779,11 +780,11 @@ func (s *service) SearchByID(peerID string) (Peer, error) {
 	return peer, nil
 }
 
-func (s *service) SearchPath(peerValues ...string) ([]Peer, error) {
+func (s *service) SearchPath(ctx context.Context, peerValues ...string) ([]Peer, error) {
 	var peers []Peer
 
 	for i, v := range peerValues {
-		peer, err := s.Search(v)
+		peer, err := s.Search(ctx, v)
 		if err != nil {
 			return nil, maskAny(err)
 		}
@@ -883,16 +884,16 @@ func (s *service) movePeers(peerA, peerB Peer) error {
 
 // movePosition applies the position value of the position peer of peerA to the
 // position peer of peerB.
-func (s *service) movePosition(peerA, peerB Peer) error {
+func (s *service) movePosition(ctx context.Context, peerA, peerB Peer) error {
 	// Fetch the position peer of the peer requested to be used to update the
 	// position of the other peer.
-	positionA, err := s.Position(peerA.Value())
+	positionA, err := s.Position(ctx, peerA.Value())
 	if err != nil {
 		return maskAny(err)
 	}
 
 	// Fetch the position peer of the peer requested to get its position updated.
-	positionB, err := s.Position(peerB.Value())
+	positionB, err := s.Position(ctx, peerB.Value())
 	if err != nil {
 		return maskAny(err)
 	}
@@ -990,7 +991,7 @@ func (s *service) newIndexActions(peerA, peerB Peer) []func(canceler <-chan stru
 }
 
 // search looks up the peer associated to the given peer value.
-func (s *service) search(peerValue string) (Peer, error) {
+func (s *service) search(ctx context.Context, peerValue string) (Peer, error) {
 	peerID, err := s.index.Search(NamespaceValue, s.Kind(), s.Kind(), peerValue)
 	if index.IsNotFound(err) {
 		return nil, maskAnyf(notFoundError, peerValue)

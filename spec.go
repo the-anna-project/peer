@@ -3,6 +3,8 @@ package peer
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/the-anna-project/context"
 )
 
 // Peer represents a single peer within the connection space of the neural
@@ -75,14 +77,14 @@ type Service interface {
 	// Create creates a new peer for the given peer value. Additionally Create
 	// ensures that all necessary references and connections related to a new peer
 	// are constructued.
-	Create(peerAValue string) (Peer, error)
+	Create(ctx context.Context, peerAValue string) (Peer, error)
 	// Delete removes the peer identified by the given peer value. Additionally
 	// Delete ensures that all necessary references and connections related to the
 	// identified peer are cleaned up.
-	Delete(peerAValue string) error
+	Delete(ctx context.Context, peerAValue string) error
 	// Exists checks whether the peer identified by the given peer value exists.
 	// Exists returns also true in case the peer being looked up is deprecated.
-	Exists(peerAValue string) (bool, error)
+	Exists(ctx context.Context, peerAValue string) (bool, error)
 	// Kind returns the kind of the current service implementation. This must be
 	// either KindBehaviour or KindInformation.
 	Kind() string
@@ -100,16 +102,16 @@ type Service interface {
 	// accordingly to guaranty the neural network operable.
 	//
 	// Mutate may never be used in combination with peers of kind KindBehaviour.
-	Mutate(peerAValue, newPeerAValue, newPeerBValue string) (Peer, Peer, error)
+	Mutate(ctx context.Context, peerAValue, newPeerAValue, newPeerBValue string) (Peer, Peer, error)
 	// Position looks up the position of the peer identified by the given peer
 	// value. The peer returned by Position is always a position peer. The call to
 	// Peer.Value of a position peer must always return the position of the
 	// initially referenced peer. This behaviour applies to all kind of peers,
 	// whether they are of the kind KindBehaviour or KindInformation.
-	Position(peerAValue string) (Peer, error)
+	Position(ctx context.Context, peerAValue string) (Peer, error)
 	// Random searches for a random peer of the connection space and returns it.
 	// The returned peer is never deprecated.
-	Random() (Peer, error)
+	Random(ctx context.Context) (Peer, error)
 	// Search looks up the peer identified by the given peer value. Therefore the
 	// given peer value is used to resolve the actual peer ID. The mapping between
 	// peer values and peer IDs is managemed by the index service. Note that
@@ -121,10 +123,10 @@ type Service interface {
 	// primitives of the peer service are adviced to handle the deprecate error by
 	// reevaluating the connections of the associated peers using the connection
 	// service accordingly.
-	Search(peerAValue string) (Peer, error)
+	Search(ctx context.Context, peerAValue string) (Peer, error)
 	// SearchByID is like Search, with the exception that it uses a peer's ID for
 	// the initial index lookup.
-	SearchByID(peerAID string) (Peer, error)
+	SearchByID(ctx context.Context, peerAID string) (Peer, error)
 	// SearchPath looks up the chain of peers associated with the given list of
 	// peer values, if any. Imagine having the following information peer values.
 	//
@@ -132,7 +134,7 @@ type Service interface {
 	//
 	// Here the information peer values form a chain in which the direct
 	// neighbours are connected.
-	SearchPath(peerValues ...string) ([]Peer, error)
+	SearchPath(ctx context.Context, peerValues ...string) ([]Peer, error)
 	// Shutdown ends all processes of the service like shutting down a machine.
 	// The call to Shutdown blocks until the service is completely shut down, so
 	// you might want to call it in a separate goroutine.
